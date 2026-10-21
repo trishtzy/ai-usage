@@ -92,6 +92,18 @@ struct BarArgs {
     /// `#rrggbb`, or `none`
     #[arg(long, value_name = "COLOR", default_value = "black", value_parser = parse_background)]
     background: Background,
+
+    /// When the line scrolls sideways.
+    #[arg(long, value_enum, default_value_t = Scroll::Always)]
+    scroll: Scroll,
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Scroll {
+    /// All the time, like a ticker.
+    Always,
+    /// Only when the line is too wide to fit.
+    Overflow,
 }
 
 #[derive(Args)]
@@ -299,38 +311,70 @@ fn run_bar(dirs: &Dirs, args: &BarArgs) {
         }
     }
 
-    let keys = keys::Keys::new();
+    use std::time::{Duration, Instant};
+
+    /// How long the line takes to move one column. Slow enough to read.
+    const STEP: Duration = Duration::from_millis(250);
+    /// How long the line rests each time its start reaches the left edge.
+    const REST: Duration = Duration::from_secs(3);
+    /// How often to redraw when the line is still.
+    const IDLE: Duration = Duration::from_millis(250);
+    /// The longest to wait without checking for a resize. A new Rex pane
+    /// starts at a stand-in size and gets its real one just after.
+    const RESIZE_CHECK: Duration = Duration::from_millis(50);
+
+    let keys = keys::Keys::new().map(keys::Keys::with_clicks);
     print!("\x1b[?25l");
     let _cursor = ShowCursor;
-    let interval = std::time::Duration::from_secs(args.interval);
-    let mut cards = status_cards(dirs, Local::now());
-    let mut read_at = std::time::Instant::now();
+
+    // Reading the logs takes long enough to stall the animation, so it
+    // happens on its own thread and sends each new set of cards over.
+    let (send, cards_in) = std::sync::mpsc::channel();
+    let reader_dirs = dirs.clone();
+    let interval = Duration::from_secs(args.interval);
+    std::thread::spawn(move || {
+        loop {
+            if send.send(status_cards(&reader_dirs, Local::now())).is_err() {
+                return;
+            }
+            std::thread::sleep(interval);
+        }
+    });
+    let Ok(mut cards) = cards_in.recv() else {
+        return;
+    };
+
     let mut offset = 0;
     let mut last_size = None;
+    let mut next_frame = Instant::now();
     loop {
-        if read_at.elapsed() >= interval {
-            cards = status_cards(dirs, Local::now());
-            read_at = std::time::Instant::now();
+        if let Some(latest) = cards_in.try_iter().last() {
+            cards = latest;
         }
         let size = terminal_size::terminal_size();
         let (width, height) = size.map_or((80, 1), |(w, h)| (w.0 as usize, h.0 as usize));
         let cells = bar::line(&cards);
-        let scrolls = bar::scrolls(&cells, width);
+        let scrolls =
+            args.scroll == Scroll::Always || bar::overflows(&cells, bar::line_width(width));
         // Every row is drawn in full, so a bar floating over other panes
         // hides them. Clear first only when the size changes.
         let clear = if size == last_size { "" } else { "\x1b[2J" };
         last_size = size;
         let background = args.background.0.as_deref();
-        let middle = height.div_ceil(2).max(1);
-        let mut frame = clear.to_string();
+        // The middle row, or the lower of the two middle ones: Rex leaves
+        // spare space below a pane's last row, so that one looks centred.
+        let middle = height / 2 + 1;
+        // Sent as one synchronized update, so a half-drawn frame never shows.
+        let mut frame = format!("\x1b[?2026h{clear}");
         for row in 1..=height.max(1) {
             let text = if row == middle {
-                bar::render(&cells, width, offset, background)
+                bar::render_bar(&cells, width, offset, scrolls, background)
             } else {
                 bar::blank_row(width, background)
             };
             frame.push_str(&format!("\x1b[{row};1H{text}"));
         }
+        frame.push_str("\x1b[?2026l");
         let mut stdout = std::io::stdout().lock();
         if stdout
             .write_all(frame.as_bytes())
@@ -340,22 +384,47 @@ fn run_bar(dirs: &Dirs, args: &BarArgs) {
             return;
         }
         drop(stdout);
-        let tick = if scrolls {
-            offset += 1;
-            std::time::Duration::from_millis(150)
-        } else {
+
+        let wait = if !scrolls {
             offset = 0;
-            std::time::Duration::from_millis(250)
+            IDLE
+        } else {
+            let period = bar::period(&cells, bar::line_width(width));
+            offset = (offset + 1) % period;
+            // Rest with the start of the line at the left edge.
+            if offset == 1 { REST } else { STEP }
         };
-        match &keys {
-            Some(keys) if keys.quit_pressed(tick) => return,
-            Some(_) => {}
-            None => std::thread::sleep(tick),
+        // Frames go out on a fixed beat, however long drawing took.
+        next_frame += wait;
+        let now = Instant::now();
+        if next_frame < now {
+            next_frame = now;
+        }
+        while let Some(left) = next_frame.checked_duration_since(Instant::now()) {
+            if left.is_zero() {
+                break;
+            }
+            let left = left.min(RESIZE_CHECK);
+            match keys.as_ref().map(|keys| keys.read(left)) {
+                Some(Some(keys::Input::Quit)) => return,
+                Some(Some(keys::Input::Click { column, .. }))
+                    if bar::dismiss_columns(width)
+                        .is_some_and(|c| c.contains(&usize::from(column))) =>
+                {
+                    return;
+                }
+                Some(_) => {}
+                None => std::thread::sleep(left),
+            }
+            if terminal_size::terminal_size() != size {
+                next_frame = Instant::now();
+            }
         }
     }
 }
 
 /// Where each provider keeps its data. Only Claude Code's is required.
+#[derive(Clone)]
 struct Dirs {
     claude: PathBuf,
     codex: Option<PathBuf>,
