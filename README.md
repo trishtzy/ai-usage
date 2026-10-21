@@ -2,9 +2,10 @@
 
 A usage bar for [Rex](https://www.superlogical.com/rex/docs). One action
 floats a bar across the top of the current tab, showing your AI plan limits
-and today's tokens for Claude Code, Codex and OpenCode:
+and today's tokens for Claude Code, Codex, OpenCode, Cursor, Grok, Gemini CLI
+and Qwen Code, plus any other provider whose API responses you log:
 
-![The ai-usage bar across the top of a Rex tab](ai-usage-bar-demo.png)
+![The ai-usage bar scrolling across the top of a Rex tab](ai-usage-demo.gif)
 
 It reads the data those tools already keep on your machine, so it needs no
 API keys or network access. The bar scrolls like a ticker when it's wider
@@ -114,6 +115,7 @@ The bar takes focus when it opens, so Esc closes it straight away. Clicking
 | `interval`   | `30`                          | Seconds between rereading usage                           |
 | `rows`       | `3`                           | The bar's height when it opens                            |
 | `background` | `"black"`                     | `"black"` (the theme's palette black) or `"#rrggbb"`      |
+| `sources`    | none                          | Other providers, as `{ name = "/log/dir" }` ([below](#other-providers)) |
 
 The bar always opens along the top. Rex can't yet place a floating pane
 along the bottom correctly.
@@ -135,8 +137,54 @@ hands them only to its status line command. Make `ai-usage` that command in
 ```
 
 It saves each update for the bar to read, and shows the limits as Claude
-Code's status line, such as `5h 14% · 7d 46%`. Codex's limits are read from
-its own logs and need no setup. OpenCode has no plan limits.
+Code's status line, such as `5h 14% · 7d 46%`. Codex's and Grok's limits are
+read from their own logs and need no setup. The other tools keep no plan
+limits on disk, so they show tokens only.
+
+## Other providers
+
+For a provider ai-usage doesn't read itself, such as DeepSeek's API used
+directly or a private router like Longwire, log its API responses and point
+ai-usage at them:
+
+```sh
+ai-usage --source longwire="$HOME/.local/share/ai-usage/longwire"
+```
+
+In Rex, pass them to `setup`:
+
+```lua
+require("ai_usage").setup{
+  bin = "/Users/you/.nix-profile/bin/ai-usage",
+  sources = { longwire = "/Users/you/.local/share/ai-usage/longwire" },
+}
+```
+
+ai-usage reads every `.jsonl` file under the directory. Each line is one API
+response, exactly as it came back:
+
+```json
+{"id":"chatcmpl-1","created":1792573200,"model":"deepseek-chat","usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_cache_hit_tokens":800}}
+```
+
+It understands the usage of OpenAI-compatible chat completions (DeepSeek,
+OpenRouter, most routers), OpenAI's Responses API, and Anthropic's Messages
+API. A line's time comes from the response's `created` or `created_at`.
+Anthropic responses carry no time, so wrap them:
+
+```json
+{"timestamp":"2026-10-21T09:00:00Z","response":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5}}}
+```
+
+Something has to write these lines: ai-usage only reads them. The simplest
+is to append each response as your script or proxy gets it, for example
+`curl … | tee -a ~/.local/share/ai-usage/longwire/2026-10.jsonl`. When
+streaming, usage arrives only in the last chunk, and only if the request
+asks for it (`"stream_options": {"include_usage": true}` for OpenAI-style
+APIs). Log that chunk or the assembled response, not the raw stream.
+
+Don't add a source for a model you use through an agent ai-usage already
+reads, such as DeepSeek through OpenCode, or it's counted twice.
 
 ## Troubleshooting
 
@@ -146,8 +194,11 @@ config it last loaded until you reload, so this also happens after moving
 the binary or the repo.
 
 **A provider is missing.** The bar shows only providers used today. If you
-keep a tool's data somewhere unusual, it follows `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME` and `XDG_DATA_HOME` as the server sees them.
+keep a tool's data somewhere unusual, ai-usage follows `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `XDG_DATA_HOME`, `GROK_HOME`, `GEMINI_CLI_HOME`,
+`QWEN_RUNTIME_DIR` and `QWEN_HOME` as the server sees them. Qwen Code
+writes its usage ledger only while its usage statistics setting is on, which
+is the default.
 
 **Rex runs on another machine.** The bar runs on the Rex server, so it
 reads usage from that machine, and `bin` must be a path there.
@@ -165,14 +216,20 @@ ai-usage tokens --format line # one short line, for a tab or session label
 ai-usage bar                  # the bar itself, in any terminal
 ```
 
-`--claude-dir`, `--codex-dir` and `--opencode-dir` point it at data kept
-somewhere other than the default.
+`--claude-dir`, `--codex-dir`, `--opencode-dir`, `--cursor-db`,
+`--grok-dir`, `--gemini-dir` and `--qwen-dir` point it at data kept
+somewhere other than the default, and `--source` adds
+[other providers](#other-providers).
 
-| Provider    | Tokens from                                   | Plan limits from            |
-| ----------- | --------------------------------------------- | --------------------------- |
-| Claude Code | `~/.claude/projects` session logs             | Its status line (see above) |
-| Codex       | `~/.codex/sessions` session files             | Its session files           |
-| OpenCode    | SQLite databases in `~/.local/share/opencode` | None                        |
+| Provider    | Tokens from                                                | Plan limits from            |
+| ----------- | ---------------------------------------------------------- | --------------------------- |
+| Claude Code | `~/.claude/projects` session logs                          | Its status line (see above) |
+| Codex       | `~/.codex/sessions` session files                          | Its session files           |
+| OpenCode    | SQLite databases in `~/.local/share/opencode`              | None                        |
+| Cursor      | Its chat store, `Cursor/User/globalStorage/state.vscdb`    | None                        |
+| Grok Build  | `usage.json` in each session under `~/.grok/sessions`      | Its log, `~/.grok/logs`     |
+| Gemini CLI  | Chat recordings under `~/.gemini/tmp`                      | None                        |
+| Qwen Code   | Its usage ledger, `~/.qwen/usage/token-usage-*.jsonl`      | None                        |
 
 ## Development
 

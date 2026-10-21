@@ -74,18 +74,31 @@ end
 --   background  the bar's colour: "black" (the theme's palette black, the
 --               default) or "#rrggbb"
 --   key         a key to bind the action to, such as "cmd+shift+u"
+--   sources     other providers' logged API responses, as name = directory,
+--               such as { longwire = "/path/to/longwire-logs" }
 function M.setup(opts)
   opts = opts or {}
   local bin = opts.bin or "ai-usage"
   local interval = opts.interval or 30
   local rows = opts.rows or 3
   local background = opts.background or "black"
+  local command = { bin, "bar", "--interval", tostring(interval), "--background", background }
+  -- Sorted, so the bar's command is the same from one reload to the next.
+  local names = {}
+  for name in pairs(opts.sources or {}) do
+    names[#names + 1] = name
+  end
+  table.sort(names)
+  for _, name in ipairs(names) do
+    command[#command + 1] = "--source"
+    command[#command + 1] = name .. "=" .. opts.sources[name]
+  end
 
   rex.action{
     name = "ai_usage",
     title = "Toggle AI Usage",
-    description = "Show today's usage and plan limits for Claude Code, Codex and OpenCode in a bar across the top.",
-    keywords = "tokens limits quota claude codex opencode bar",
+    description = "Show today's usage and plan limits for Claude Code, Codex, OpenCode, Cursor, Grok, Gemini CLI and Qwen Code in a bar across the top.",
+    keywords = "tokens limits quota claude codex opencode cursor grok gemini qwen bar",
     run = function(ctx, args)
       local view, err = rex.session.view{}
       if err ~= nil then error(err, 0) end
@@ -109,7 +122,7 @@ function M.setup(opts)
           flavor = TERMINAL .. ".shell",
           label = LABEL,
           options = {
-            command = { bin, "bar", "--interval", tostring(interval), "--background", background },
+            command = command,
             shell = "none",
           },
         },

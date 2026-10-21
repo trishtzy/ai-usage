@@ -1,9 +1,14 @@
 mod bar;
 mod claude;
 mod codex;
+mod cursor;
+mod gemini;
+mod grok;
 mod keys;
 mod opencode;
+mod qwen;
 mod report;
+mod source;
 mod status;
 mod usage;
 
@@ -41,6 +46,45 @@ struct Cli {
     /// [default: $XDG_DATA_HOME/opencode, or ~/.local/share/opencode]
     #[arg(long, global = true, value_name = "DIR")]
     opencode_dir: Option<PathBuf>,
+
+    /// Cursor's chat store [default: Cursor/User/globalStorage/state.vscdb
+    /// under ~/Library/Application Support on macOS, otherwise
+    /// $XDG_CONFIG_HOME or ~/.config]
+    #[arg(long, global = true, value_name = "FILE")]
+    cursor_db: Option<PathBuf>,
+
+    /// Grok Build's home directory [default: $GROK_HOME, or ~/.grok]
+    #[arg(long, global = true, value_name = "DIR")]
+    grok_dir: Option<PathBuf>,
+
+    /// Gemini CLI's directory [default: $GEMINI_CLI_HOME/.gemini, or ~/.gemini]
+    #[arg(long, global = true, value_name = "DIR")]
+    gemini_dir: Option<PathBuf>,
+
+    /// Qwen Code's runtime directory, holding `usage/`
+    /// [default: $QWEN_RUNTIME_DIR, $QWEN_HOME, or ~/.qwen]
+    #[arg(long, global = true, value_name = "DIR")]
+    qwen_dir: Option<PathBuf>,
+
+    /// Another provider, named NAME, whose API responses are logged as
+    /// JSONL under DIR. Repeat for more.
+    #[arg(long = "source", global = true, value_name = "NAME=DIR", value_parser = parse_source)]
+    sources: Vec<source::Source>,
+}
+
+/// Providers ai-usage reads itself, which a `--source` can't be named.
+const BUILTIN: [&str; 7] = [
+    claude::PROVIDER,
+    codex::PROVIDER,
+    opencode::PROVIDER,
+    cursor::PROVIDER,
+    grok::PROVIDER,
+    gemini::PROVIDER,
+    qwen::PROVIDER,
+];
+
+fn parse_source(s: &str) -> Result<source::Source, String> {
+    source::parse(s, &BUILTIN)
 }
 
 #[derive(Subcommand)]
@@ -190,6 +234,11 @@ fn main() -> ExitCode {
         claude: claude_dir,
         codex: cli.codex_dir.or_else(codex::default_dir),
         opencode: cli.opencode_dir.or_else(opencode::default_dir),
+        cursor: cli.cursor_db.or_else(cursor::default_path),
+        grok: cli.grok_dir.or_else(grok::default_dir),
+        gemini: cli.gemini_dir.or_else(gemini::default_dir),
+        qwen: cli.qwen_dir.or_else(qwen::default_dir),
+        sources: cli.sources,
     };
 
     match cli.command.unwrap_or(Command::Status(cli.status)) {
@@ -285,6 +334,21 @@ fn main() -> ExitCode {
             let mut records = claude::records(&dirs.claude, since);
             if let Some(dir) = &dirs.opencode {
                 records.extend(opencode::records(dir, since));
+            }
+            if let Some(path) = &dirs.cursor {
+                records.extend(cursor::records(path, since));
+            }
+            if let Some(dir) = &dirs.grok {
+                records.extend(grok::records(dir, since));
+            }
+            if let Some(dir) = &dirs.gemini {
+                records.extend(gemini::records(dir, since));
+            }
+            if let Some(dir) = &dirs.qwen {
+                records.extend(qwen::records(dir, since));
+            }
+            for source in &dirs.sources {
+                records.extend(source::records(source, since));
             }
             let report = Report::new(args.since.label(), since, records);
             let out = match args.format {
@@ -429,6 +493,11 @@ struct Dirs {
     claude: PathBuf,
     codex: Option<PathBuf>,
     opencode: Option<PathBuf>,
+    cursor: Option<PathBuf>,
+    grok: Option<PathBuf>,
+    gemini: Option<PathBuf>,
+    qwen: Option<PathBuf>,
+    sources: Vec<source::Source>,
 }
 
 /// One card per provider used today.
@@ -443,9 +512,20 @@ fn status_cards(dirs: &Dirs, now: DateTime<Local>) -> Vec<usage::Card> {
         dirs.opencode
             .as_deref()
             .and_then(|dir| opencode::card(dir, today)),
+        dirs.cursor
+            .as_deref()
+            .and_then(|path| cursor::card(path, today)),
+        dirs.grok
+            .as_deref()
+            .and_then(|dir| grok::card(dir, today, now.to_utc())),
+        dirs.gemini
+            .as_deref()
+            .and_then(|dir| gemini::card(dir, today)),
+        dirs.qwen.as_deref().and_then(|dir| qwen::card(dir, today)),
     ]
     .into_iter()
     .flatten()
+    .chain(dirs.sources.iter().filter_map(|s| source::card(s, today)))
     .collect()
 }
 

@@ -257,6 +257,10 @@ pub fn mark(provider: &str) -> (&'static str, &'static str) {
         "claude" => ("✻", "38;2;217;119;87"),
         "codex" => ("⬡", "1"),
         "opencode" => ("▣", "1"),
+        "cursor" => ("⬢", "1"),
+        "grok" => ("◆", "1"),
+        "gemini" => ("✦", "1"),
+        "qwen" => ("◈", "1"),
         _ => ("●", "2"),
     }
 }
