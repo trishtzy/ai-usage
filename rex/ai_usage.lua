@@ -4,7 +4,7 @@
 --
 -- In ~/.config/rex/init.lua:
 --
---   package.path = "/path/to/rex-ai-usage-plugin/rex/?.lua;" .. package.path
+--   package.path = "/path/to/ai-usage/rex/?.lua;" .. package.path
 --   require("ai_usage").setup{ bin = "/path/to/ai-usage" }
 --
 -- Then run `rex config reload`.
@@ -103,8 +103,8 @@ function M.setup(opts)
       local height = math.min(math.max(rows / total, 0.02), 0.5)
       local _, new_err = rex.session.new_layer{
         bounds = { 0, 0, 1, height },
-        -- Typing stays in the pane it was in.
-        focus = false,
+        -- Focused, so Esc dismisses it straight away.
+        focus = true,
         layout = rex.layout.block{
           flavor = TERMINAL .. ".shell",
           label = LABEL,
