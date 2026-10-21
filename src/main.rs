@@ -1,30 +1,69 @@
 mod claude;
+mod codex;
 mod report;
+mod status;
 mod usage;
 
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chrono::{DateTime, Local, TimeDelta, Utc};
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::report::Report;
 
-/// Show AI token usage from local coding-agent logs.
+/// Show AI plan limits and token usage from local coding-agent data.
 #[derive(Parser)]
-#[command(version)]
+#[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Options for `status`, which runs when no command is given.
+    #[command(flatten)]
+    status: StatusArgs,
+
+    /// Claude Code projects directory
+    /// [default: $CLAUDE_CONFIG_DIR/projects, or ~/.claude/projects]
+    #[arg(long, global = true, value_name = "DIR")]
+    claude_dir: Option<PathBuf>,
+
+    /// Codex sessions directory
+    /// [default: $CODEX_HOME/sessions, or ~/.codex/sessions]
+    #[arg(long, global = true, value_name = "DIR")]
+    codex_dir: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Plan limits as progress bars, and today's tokens (the default).
+    Status(StatusArgs),
+    /// Token totals per model.
+    Tokens(TokensArgs),
+    /// Run as Claude Code's status line, saving plan limits for `status`.
+    ClaudeStatusline,
+}
+
+#[derive(Args)]
+struct StatusArgs {
+    /// Print JSON instead of bars.
+    #[arg(long)]
+    json: bool,
+
+    /// Width to lay out for [default: the terminal's, or 80]
+    #[arg(long)]
+    width: Option<usize>,
+}
+
+#[derive(Args)]
+struct TokensArgs {
     /// Window to report: `today`, `all`, or a duration such as `5h` or `7d`.
     #[arg(long, default_value = "today", value_parser = parse_window)]
     since: Window,
 
     #[arg(long, value_enum, default_value_t = Format::Table)]
     format: Format,
-
-    /// Claude Code projects directory
-    /// [default: $CLAUDE_CONFIG_DIR/projects, or ~/.claude/projects]
-    #[arg(long, value_name = "DIR")]
-    claude_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -92,21 +131,60 @@ fn parse_window(s: &str) -> Result<Window, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let since = cli.since.start(Local::now());
-
+    let now = Local::now();
     let Some(claude_dir) = cli.claude_dir.or_else(claude::default_dir) else {
         eprintln!("ai-usage: can't find the Claude Code directory; set HOME or pass --claude-dir");
         return ExitCode::FAILURE;
     };
-    let records = claude::records(&claude_dir, since);
 
-    let report = Report::new(cli.since.label(), since, records);
-    let out = match cli.format {
-        Format::Table => report.table(),
-        Format::Json => report.json(),
-        Format::Line => report.line(),
-    };
-    print!("{out}");
+    match cli.command.unwrap_or(Command::Status(cli.status)) {
+        Command::ClaudeStatusline => {
+            let mut input = String::new();
+            let _ = std::io::stdin().read_to_string(&mut input);
+            let path = claude::limits::default_path();
+            println!(
+                "{}",
+                claude::limits::statusline(&input, path.as_deref(), now.to_utc())
+            );
+        }
+        Command::Status(args) => {
+            let limits_path = claude::limits::default_path();
+            let today = Window::Today.start(now);
+            let cards: Vec<_> = [
+                claude::card(&claude_dir, limits_path.as_deref(), today, now.to_utc()),
+                cli.codex_dir
+                    .or_else(codex::default_dir)
+                    .and_then(|dir| codex::card(&dir, now.to_utc())),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if args.json {
+                print!("{}", status::json(&cards, now.to_utc()));
+            } else {
+                let style = status::Style {
+                    width: args
+                        .width
+                        .or_else(|| terminal_size::terminal_size().map(|(w, _)| w.0 as usize))
+                        .unwrap_or(80),
+                    color: std::io::stdout().is_terminal()
+                        && std::env::var_os("NO_COLOR").is_none(),
+                };
+                print!("{}", status::render(&cards, now, &style));
+            }
+        }
+        Command::Tokens(args) => {
+            let since = args.since.start(now);
+            let records = claude::records(&claude_dir, since);
+            let report = Report::new(args.since.label(), since, records);
+            let out = match args.format {
+                Format::Table => report.table(),
+                Format::Json => report.json(),
+                Format::Line => report.line(),
+            };
+            print!("{out}");
+        }
+    }
     ExitCode::SUCCESS
 }
 

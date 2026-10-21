@@ -17,7 +17,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use crate::usage::{Record, Tokens};
+use crate::usage::{Card, Meter, Record, Tokens, ago, compact};
+
+pub mod limits;
 
 pub const PROVIDER: &str = "claude";
 
@@ -78,6 +80,57 @@ pub fn records(dir: &Path, since: Option<DateTime<Utc>>) -> Vec<Record> {
         }
     }
     records
+}
+
+/// The Claude card for `ai-usage status`: plan limits from the last status
+/// line update, and tokens used since `today`. `None` when Claude Code has
+/// left neither behind.
+pub fn card(
+    dir: &Path,
+    limits_path: Option<&Path>,
+    today: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<Card> {
+    let snapshot = limits_path.and_then(limits::load);
+    if snapshot.is_none() && !dir.exists() {
+        return None;
+    }
+    let mut card = Card {
+        provider: PROVIDER,
+        title: "Claude Code",
+        as_of: None,
+        meters: Vec::new(),
+        notes: Vec::new(),
+    };
+    match &snapshot {
+        Some(snapshot) => {
+            card.meters = limits::meters(snapshot, now);
+            if card.meters.is_empty() {
+                card.notes.push(format!(
+                    "No current plan limits. Claude Code last reported them {}.",
+                    ago(snapshot.as_of, now)
+                ));
+            } else {
+                card.as_of = Some(snapshot.as_of);
+            }
+        }
+        None => card.notes.push(
+            "Plan limits show up once Claude Code runs `ai-usage claude-statusline` as its status line."
+                .to_string(),
+        ),
+    }
+    let used: u64 = records(dir, today)
+        .iter()
+        .map(|r| r.tokens.input + r.tokens.output)
+        .sum();
+    card.meters.push(Meter {
+        label: "Today".to_string(),
+        detail: Some("Input + output".to_string()),
+        used_percent: None,
+        value: format!("{} tokens", compact(used)),
+        resets_at: None,
+    });
+    Some(card)
 }
 
 fn read_file(
@@ -228,5 +281,79 @@ mod tests {
     fn missing_dir_has_no_records() {
         let dir = tempfile::tempdir().unwrap();
         assert!(records(&dir.path().join("absent"), None).is_empty());
+    }
+
+    #[test]
+    fn card_without_status_line_has_todays_tokens_and_a_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("p/s.jsonl"),
+            &[line("msg_a", "m", "2026-10-21T10:00:00Z", 1_499)],
+        );
+        let now = "2026-10-21T12:00:00Z".parse().unwrap();
+        let today = Some("2026-10-21T00:00:00Z".parse().unwrap());
+
+        let card = card(
+            dir.path(),
+            Some(&dir.path().join("no-limits.json")),
+            today,
+            now,
+        )
+        .unwrap();
+        assert_eq!(card.as_of, None);
+        assert_eq!(card.meters.len(), 1);
+        assert_eq!(card.meters[0].value, "1.5K tokens");
+        assert_eq!(card.meters[0].used_percent, None);
+        assert!(
+            card.notes[0].contains("ai-usage claude-statusline"),
+            "{:?}",
+            card.notes
+        );
+    }
+
+    #[test]
+    fn card_reports_limits_that_have_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = dir.path().join("limits.json");
+        let reported = "2026-10-21T09:00:00Z".parse().unwrap();
+        let input = format!(
+            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":80,"resets_at":{}}}}}}}"#,
+            reported_plus(reported, 3_600)
+        );
+        limits::statusline(&input, Some(&limits), reported);
+        let now = "2026-10-21T12:00:00Z".parse().unwrap();
+
+        let card = card(&dir.path().join("absent"), Some(&limits), None, now).unwrap();
+        assert_eq!(card.as_of, None);
+        assert_eq!(
+            card.meters
+                .iter()
+                .filter(|m| m.used_percent.is_some())
+                .count(),
+            0
+        );
+        assert_eq!(
+            card.notes,
+            ["No current plan limits. Claude Code last reported them 3 h ago."]
+        );
+    }
+
+    #[test]
+    fn no_card_without_logs_or_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = "2026-10-21T12:00:00Z".parse().unwrap();
+        assert_eq!(
+            card(
+                &dir.path().join("absent"),
+                Some(&dir.path().join("x.json")),
+                None,
+                now
+            ),
+            None
+        );
+    }
+
+    fn reported_plus(at: DateTime<Utc>, seconds: i64) -> i64 {
+        at.timestamp() + seconds
     }
 }

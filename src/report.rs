@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Local, Utc};
 use serde_json::json;
 
-use crate::usage::{Record, Tokens};
+use crate::usage::{Record, Tokens, compact};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Row {
@@ -203,17 +203,6 @@ fn thousands(n: u64) -> String {
     out
 }
 
-/// 1234567 → `1.2M`.
-fn compact(n: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")];
-    for (size, unit) in UNITS {
-        if n >= size {
-            return format!("{:.1}{unit}", n as f64 / size as f64);
-        }
-    }
-    n.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,8 +276,5 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
         assert_eq!(thousands(1_234_567), "1,234,567");
-        assert_eq!(compact(999), "999");
-        assert_eq!(compact(12_345), "12.3K");
-        assert_eq!(compact(3_000_000_000), "3.0B");
     }
 }
