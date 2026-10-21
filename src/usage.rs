@@ -69,6 +69,17 @@ impl Meter {
             resets_at,
         }
     }
+
+    /// Input and output tokens used today, as a figure with no bar.
+    pub fn today(tokens: u64) -> Self {
+        Meter {
+            label: "Today".to_string(),
+            detail: None,
+            used_percent: None,
+            value: format!("{} tokens", compact(tokens)),
+            resets_at: None,
+        }
+    }
 }
 
 /// Names a usage window the way claude.ai does, such as `This week`.

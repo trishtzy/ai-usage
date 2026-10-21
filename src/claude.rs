@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use crate::usage::{Card, Meter, Record, Tokens, ago, compact};
+use crate::usage::{Card, Meter, Record, Tokens, ago};
 
 pub mod limits;
 
@@ -83,18 +83,22 @@ pub fn records(dir: &Path, since: Option<DateTime<Utc>>) -> Vec<Record> {
 }
 
 /// The Claude card for `ai-usage status`: plan limits from the last status
-/// line update, and tokens used since `today`. `None` when Claude Code has
-/// left neither behind.
+/// line update, and tokens used since `today`. `None` when Claude Code
+/// hasn't been used since then.
 pub fn card(
     dir: &Path,
     limits_path: Option<&Path>,
-    today: Option<DateTime<Utc>>,
+    today: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Option<Card> {
-    let snapshot = limits_path.and_then(limits::load);
-    if snapshot.is_none() && !dir.exists() {
+    let used: u64 = records(dir, Some(today))
+        .iter()
+        .map(|r| r.tokens.input + r.tokens.output)
+        .sum();
+    if used == 0 {
         return None;
     }
+    let snapshot = limits_path.and_then(limits::load);
     let mut card = Card {
         provider: PROVIDER,
         title: "Claude Code",
@@ -119,17 +123,7 @@ pub fn card(
                 .to_string(),
         ),
     }
-    let used: u64 = records(dir, today)
-        .iter()
-        .map(|r| r.tokens.input + r.tokens.output)
-        .sum();
-    card.meters.push(Meter {
-        label: "Today".to_string(),
-        detail: Some("Input + output".to_string()),
-        used_percent: None,
-        value: format!("{} tokens", compact(used)),
-        resets_at: None,
-    });
+    card.meters.push(Meter::today(used));
     Some(card)
 }
 
@@ -291,7 +285,7 @@ mod tests {
             &[line("msg_a", "m", "2026-10-21T10:00:00Z", 1_499)],
         );
         let now = "2026-10-21T12:00:00Z".parse().unwrap();
-        let today = Some("2026-10-21T00:00:00Z".parse().unwrap());
+        let today = "2026-10-21T00:00:00Z".parse().unwrap();
 
         let card = card(
             dir.path(),
@@ -314,6 +308,11 @@ mod tests {
     #[test]
     fn card_reports_limits_that_have_reset() {
         let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("p/s.jsonl"),
+            &[line("msg_a", "m", "2026-10-21T10:00:00Z", 5)],
+        );
+        let today = "2026-10-21T00:00:00Z".parse().unwrap();
         let limits = dir.path().join("limits.json");
         let reported = "2026-10-21T09:00:00Z".parse().unwrap();
         let input = format!(
@@ -323,7 +322,7 @@ mod tests {
         limits::statusline(&input, Some(&limits), reported);
         let now = "2026-10-21T12:00:00Z".parse().unwrap();
 
-        let card = card(&dir.path().join("absent"), Some(&limits), None, now).unwrap();
+        let card = card(dir.path(), Some(&limits), today, now).unwrap();
         assert_eq!(card.as_of, None);
         assert_eq!(
             card.meters
@@ -339,18 +338,16 @@ mod tests {
     }
 
     #[test]
-    fn no_card_without_logs_or_limits() {
+    fn no_card_without_usage_today() {
         let dir = tempfile::tempdir().unwrap();
-        let now = "2026-10-21T12:00:00Z".parse().unwrap();
-        assert_eq!(
-            card(
-                &dir.path().join("absent"),
-                Some(&dir.path().join("x.json")),
-                None,
-                now
-            ),
-            None
+        write(
+            &dir.path().join("p/s.jsonl"),
+            &[line("msg_a", "m", "2026-10-20T23:00:00Z", 5)],
         );
+        let now = "2026-10-21T12:00:00Z".parse().unwrap();
+        let today = "2026-10-21T00:00:00Z".parse().unwrap();
+        assert_eq!(card(dir.path(), None, today, now), None);
+        assert_eq!(card(&dir.path().join("absent"), None, today, now), None);
     }
 
     fn reported_plus(at: DateTime<Utc>, seconds: i64) -> i64 {
